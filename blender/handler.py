@@ -8,7 +8,7 @@ input:
   transparent  : render with alpha -> .webm (VP9 alpha) sent as a file; else .mp4
   audio        : file name in files (or URL) muxed into the mp4
   telegram     : default true; chat_id, caption
-  mode         : "warm" | "probe" (GPU + EEVEE self-test)
+  mode         : "warm" | "eevee_probe" (GPU + EEVEE self-test); motion jobs (bundle/html) and "probe" go to Chromium
 """
 import os, time, base64, subprocess, tempfile, shutil, glob, json
 import requests, runpod
@@ -69,7 +69,7 @@ def work(a):
         if a.get("blend"):
             blend = os.path.join(d, "scene.blend"); fetch(a["blend"], blend)
         script = None
-        if mode == "probe" and not a.get("script"):
+        if mode == "eevee_probe" and not a.get("script"):
             a["script"] = ("import bpy\nob=bpy.data.objects.get('Cube')\n"
                            "ob.rotation_euler=(0,0,0); ob.keyframe_insert('rotation_euler',frame=1)\n"
                            "ob.rotation_euler=(0,0,6.283); ob.keyframe_insert('rotation_euler',frame=48)\n")
@@ -111,7 +111,7 @@ def work(a):
         res = {"frames": len(pngs), "render_seconds": round(t_render, 2),
                "sec_per_frame": round(t_render / len(pngs), 3),
                "total_seconds": round(time.monotonic() - t0, 2), "bytes": os.path.getsize(out)}
-        if mode == "probe":
+        if mode == "eevee_probe":
             res["gpu"] = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                                         capture_output=True, text=True).stdout.strip()
             res["engine_log"] = [l for l in log_tail.splitlines() if "EEVEE" in l or "GPU" in l or "EGL" in l][-8:]
