@@ -1,15 +1,18 @@
 """Motion render worker: HTML (seek(t) + window.READY) -> MP4, rendered in parallel, sent to Telegram.
 
 input:
-  html        : page source (or html_url)
-  files       : {"name": "https://..." | "data:...;base64,..."}  saved next to index.html
+  html        : page source (or html_url); optional when bundle has index.html
+  bundle      : .tar.gz of a whole project (URL or data URI), extracted and served over http (ES modules, 3D models)
+  page        : entry file inside the bundle (default index.html)
+  files       : {"path/name": "https://..." | "data:...;base64,..."}  saved under the project folder
   audio       : file name inside files (or URL) muxed as the soundtrack
   dur, fps    : seconds, frames per second (default 30)
   width,height: default 1080x1920
   workers     : parallel browsers (default: cores//4, max 8)
   telegram    : send to Telegram (default true); chat_id, caption
 """
-import os, time, base64, subprocess, tempfile, shutil, multiprocessing as mp
+import os, io, time, base64, subprocess, tempfile, shutil, tarfile, threading, functools, multiprocessing as mp
+import http.server, socketserver
 from concurrent.futures import ThreadPoolExecutor
 import requests, runpod
 
@@ -23,6 +26,29 @@ def fetch(src, dest):
         f.write(data)
 
 
+GL_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none",
+           "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"]
+
+
+def safe_path(root, name):
+    p = os.path.normpath(os.path.join(root, name))
+    if not p.startswith(os.path.abspath(root) + os.sep):
+        raise ValueError("bad path: " + name)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    return p
+
+
+def serve(root):
+    """Serve the project over http so ES modules, fetch() and 3D model loading work."""
+    class Q(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), functools.partial(Q, directory=root))
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
 def render_range(args):
     from playwright.sync_api import sync_playwright
     path, out, fps, w, h, start, end = args
@@ -31,10 +57,10 @@ def render_range(args):
                             "-pix_fmt", "yuv420p", "-threads", "4", out], stdin=subprocess.PIPE)
     try:
         with sync_playwright() as p:
-            b = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none"])
+            b = p.chromium.launch(args=GL_ARGS)
             page = b.new_page(viewport={"width": w, "height": h})
-            page.goto("file://" + path)
-            page.wait_for_function("window.READY===true", timeout=90000)
+            page.goto(path)
+            page.wait_for_function("window.READY===true", timeout=180000)
             for i in range(start, end):
                 page.evaluate("(t)=>seek(t)", i / fps)
                 enc.stdin.write(page.screenshot(type="jpeg", quality=94))
@@ -57,32 +83,42 @@ def work(a):
     if not (1 <= fps <= 60 and 0.1 <= dur <= 900):
         raise ValueError("invalid fps or duration")
     d = tempfile.mkdtemp()
+    srv = None
     try:
+        if a.get("bundle"):
+            tgz = os.path.join(d, "_bundle.tgz"); fetch(a["bundle"], tgz)
+            with tarfile.open(tgz) as tf:
+                tf.extractall(d, filter="data")
+            os.remove(tgz)
         for name, src in (a.get("files") or {}).items():
-            dest = os.path.join(d, os.path.basename(name)); fetch(src, dest)
-        path = os.path.join(d, "index.html")
+            fetch(src, safe_path(d, name))
+        page_name = a.get("page", "index.html")
         if a.get("html_url"):
-            fetch(a["html_url"], path)
-        else:
-            open(path, "w").write(a["html"])
+            fetch(a["html_url"], safe_path(d, page_name))
+        elif a.get("html"):
+            open(safe_path(d, page_name), "w").write(a["html"])
+        srv = serve(d)
+        path = f"http://127.0.0.1:{srv.server_address[1]}/{page_name}"
         frames = round(dur * fps)
         n = int(a.get("workers") or max(1, min(8, (os.cpu_count() or 4) // 4)))
         n = max(1, min(n, frames // 15 or 1))
         step = -(-frames // n)
-        jobs = [(path, os.path.join(d, f"seg{k:02d}.mp4"), fps, w, h, k * step, min(frames, (k + 1) * step))
+        segdir = tempfile.mkdtemp()
+        jobs = [(path, os.path.join(segdir, f"seg{k:02d}.mp4"), fps, w, h, k * step, min(frames, (k + 1) * step))
                 for k in range(n) if k * step < frames]
         with mp.get_context("spawn").Pool(len(jobs)) as pool:
             segs = pool.map(render_range, jobs)
         t_render = time.monotonic() - t0
-        lst = os.path.join(d, "list.txt")
+        lst = os.path.join(segdir, "list.txt")
         open(lst, "w").write("".join(f"file '{s}'\n" for s in segs))
-        out = os.path.join(d, "video.mp4")
+        out = os.path.join(segdir, "video.mp4")
         cmd = ["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst]
         audio = a.get("audio")
         if audio:
-            ap = os.path.join(d, os.path.basename(audio))
-            if not os.path.exists(ap):
-                ap = os.path.join(d, "audio_in"); fetch(audio, ap)
+            if audio.startswith(("http", "data:")):
+                ap = os.path.join(segdir, "audio_in"); fetch(audio, ap)
+            else:
+                ap = safe_path(d, audio)
             cmd += ["-i", ap, "-map", "0:v", "-map", "1:a", "-c:a", "aac", "-b:a", "192k", "-shortest"]
         cmd += ["-c:v", "copy", "-movflags", "+faststart", out]
         subprocess.run(cmd, check=True)
@@ -102,7 +138,11 @@ def work(a):
             res["video_base64"] = base64.b64encode(open(out, "rb").read()).decode()
         return res
     finally:
+        if srv:
+            srv.shutdown()
         shutil.rmtree(d, ignore_errors=True)
+        if "segdir" in locals():
+            shutil.rmtree(segdir, ignore_errors=True)
 
 
 def handler(job):
