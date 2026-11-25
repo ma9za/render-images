@@ -162,6 +162,15 @@ def work(a):
                 res["telegram_error"] = j.get("description")
         elif res["bytes"] <= 7_000_000:
             res["video_base64"] = base64.b64encode(open(out, "rb").read()).decode()
+        if a.get("preview"):
+            # small copy so Claude can check the final render before it goes out
+            pv = os.path.join(segdir, "preview.mp4")
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", out, "-vf", "scale=360:640", "-r", "15",
+                            "-c:v", "libx264", "-preset", "veryfast", "-crf", "33", "-c:a", "aac", "-b:a", "48k", pv], check=True)
+            if os.path.getsize(pv) <= 7_000_000:
+                res["preview_base64"] = base64.b64encode(open(pv, "rb").read()).decode()
+            else:
+                res["preview_error"] = "preview too large"
         return res
     finally:
         if srv:
