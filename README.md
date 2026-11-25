@@ -13,8 +13,7 @@ Input fields are documented at the top of each `handler.py`.
 
 ## The bot (@Codexmabot)
 
-Receives the voice, images, clips and notes for the next video and keeps the list as a pinned `assets.json` in the chat (no paid storage). Run it on any small server:
+Runs on Telegram's serverless platform (tgcloud), no server. Source in `tgcloud-bot/`.
+It stores the current video's voice, images, clips and notes in its database; `endpoints/assets` (owner only) lists them or returns one file as base64.
 
-```
-docker run -d --name render-bot --restart always -e BOT_TOKEN=YOUR_TOKEN ghcr.io/ma9za/render-bot:latest
-```
+Deploy: `cd tgcloud-bot && npm i && TGCLOUD_TOKEN=... NODE_USE_ENV_PROXY=1 npx tgcloud push` (then `npx tgcloud migrate` after schema changes).

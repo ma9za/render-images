@@ -3,7 +3,7 @@ name: build images
 on:
   push:
     branches: [main]
-    paths: ["motion/**", "blender/**", "bot/**", ".github/workflows/build.yml"]
+    paths: ["motion/**", "blender/**", ".github/workflows/build.yml"]
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [motion, blender, bot]
+        image: [motion, blender]
     steps:
       - uses: actions/checkout@v4
       - name: Free disk space
