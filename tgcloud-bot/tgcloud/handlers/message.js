@@ -52,6 +52,11 @@ export default async function (m) {
     return reply(MSG.clip(fmt(vid.duration), count(n, 'مقطع واحد', 'مقطعين', 'مقاطع', 'مقطع')));
   }
 
+  if (doc.file_id) {
+    await db.insert(assets).values({ kind: 'file', fileId: doc.file_id, name: doc.file_name || 'file', caption: m.caption || null }).run();
+    return reply(`وصل الملف ✅\n${doc.file_name || ''}`);
+  }
+
   if (text) {
     await db.insert(assets).values({ kind: 'note', caption: text }).run();
     return reply(MSG.note);
