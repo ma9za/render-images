@@ -10,6 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl fon
  && fc-cache -f \
  && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
-COPY handler.py /app/handler.py
+COPY motion/handler.py /app/handler.py
 WORKDIR /app
 CMD ["python", "-u", "/app/handler.py"]

@@ -125,7 +125,12 @@ def work(a):
 
 
 def handler(job):
-    return work(job["input"])
+    a = job["input"]
+    # Motion jobs (HTML/three.js) run in Chromium on this GPU; everything else is Blender.
+    if a.get("bundle") or a.get("html") or a.get("html_url") or a.get("mode") == "probe":
+        import motion_handler
+        return motion_handler.handler(job)
+    return work(a)
 
 
 if __name__ == "__main__":

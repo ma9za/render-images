@@ -26,8 +26,31 @@ def fetch(src, dest):
         f.write(data)
 
 
-GL_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none",
-           "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"]
+import json
+BASE_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--font-render-hinting=none", "--ignore-gpu-blocklist"]
+# CPU default: SwiftShader. The GPU image sets CHROME_GL_ARGS to a hardware WebGL path.
+GL_ARGS = BASE_ARGS + json.loads(os.environ.get("CHROME_GL_ARGS") or
+                                 '["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]')
+
+PROBE_JS = """() => { const c = document.createElement('canvas'); const g = c.getContext('webgl2') || c.getContext('webgl');
+  if (!g) return 'no webgl'; const e = g.getExtension('WEBGL_debug_renderer_info');
+  return e ? g.getParameter(e.UNMASKED_RENDERER_WEBGL) : g.getParameter(g.RENDERER) }"""
+
+
+def probe(variants):
+    """Which Chrome flags give hardware WebGL here? Returns the renderer string for each flag set."""
+    from playwright.sync_api import sync_playwright
+    out = []
+    with sync_playwright() as p:
+        for v in variants:
+            try:
+                b = p.chromium.launch(args=BASE_ARGS + v)
+                pg = b.new_page()
+                out.append({"args": v, "renderer": pg.evaluate(PROBE_JS)})
+                b.close()
+            except Exception as e:
+                out.append({"args": v, "error": str(e)[:300]})
+    return out
 
 
 def safe_path(root, name):
@@ -51,13 +74,13 @@ def serve(root):
 
 def render_range(args):
     from playwright.sync_api import sync_playwright
-    path, out, fps, w, h, start, end = args
+    path, out, fps, w, h, start, end, gl = args
     enc = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-y", "-f", "image2pipe", "-vcodec", "mjpeg",
                             "-r", str(fps), "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                             "-pix_fmt", "yuv420p", "-threads", "4", out], stdin=subprocess.PIPE)
     try:
         with sync_playwright() as p:
-            b = p.chromium.launch(args=GL_ARGS)
+            b = p.chromium.launch(args=gl)
             page = b.new_page(viewport={"width": w, "height": h})
             page.goto(path)
             page.wait_for_function("window.READY===true", timeout=180000)
@@ -77,6 +100,9 @@ def render_range(args):
 def work(a):
     if a.get("mode") == "warm":
         return {"ok": True}
+    if a.get("mode") == "probe":
+        return {"probe": probe(a.get("variants") or [GL_ARGS[len(BASE_ARGS):]])}
+    gl = BASE_ARGS + a["chrome_args"] if a.get("chrome_args") else GL_ARGS
     t0 = time.monotonic()
     fps = int(a.get("fps", 30)); dur = float(a.get("dur", 5))
     w = int(a.get("width", 1080)); h = int(a.get("height", 1920))
@@ -104,7 +130,7 @@ def work(a):
         n = max(1, min(n, frames // 15 or 1))
         step = -(-frames // n)
         segdir = tempfile.mkdtemp()
-        jobs = [(path, os.path.join(segdir, f"seg{k:02d}.mp4"), fps, w, h, k * step, min(frames, (k + 1) * step))
+        jobs = [(path, os.path.join(segdir, f"seg{k:02d}.mp4"), fps, w, h, k * step, min(frames, (k + 1) * step), gl)
                 for k in range(n) if k * step < frames]
         with mp.get_context("spawn").Pool(len(jobs)) as pool:
             segs = pool.map(render_range, jobs)
