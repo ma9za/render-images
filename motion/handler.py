@@ -10,6 +10,11 @@ input:
   width,height: default 1080x1920
   workers     : parallel browsers (default: cores//4, max 8)
   telegram    : send to Telegram (default true); chat_id, caption
+  blender     : optional Blender stage run inside the extracted bundle BEFORE the page renders:
+                {"script": "scene.py", "start": 1, "end": 240, "procs": 2, "stills": [frame,...]}
+                The script gets env ASSET_DIR (bundle dir), PLATE_DIR (bundle/plate), FRAME_START/END and
+                must render its own frames (e.g. plate/f_0001.jpg) for the page to load.
+                With "stills", only those frames are rendered and returned as base64 JPEGs (no page render).
 """
 import os, io, time, base64, subprocess, tempfile, shutil, tarfile, threading, functools, multiprocessing as mp
 import http.server, socketserver
@@ -97,6 +102,28 @@ def render_range(args):
     return out
 
 
+BLENDER = "/opt/blender/blender"
+
+
+def run_blender(d, b):
+    plate = os.path.join(d, "plate"); os.makedirs(plate, exist_ok=True)
+    script = safe_path(d, b.get("script", "scene.py"))
+    def go(rng):
+        env = dict(os.environ, ASSET_DIR=d, PLATE_DIR=plate, FRAME_START=str(rng[0]), FRAME_END=str(rng[1]),
+                   STILLS=json.dumps(b.get("stills") or []))
+        p = subprocess.run([BLENDER, "-b", "--python", script], cwd=d, env=env, capture_output=True, text=True)
+        if p.returncode:
+            raise RuntimeError("blender failed:\n" + (p.stdout + p.stderr)[-3000:])
+        return (p.stdout + p.stderr)[-600:]
+    if b.get("stills"):
+        return [go((0, 0))]
+    s0, e0 = int(b["start"]), int(b["end"]); k = max(1, int(b.get("procs", 1)))
+    step = -(-(e0 - s0 + 1) // k)
+    rngs = [(s0 + i * step, min(e0, s0 + (i + 1) * step - 1)) for i in range(k) if s0 + i * step <= e0]
+    with ThreadPoolExecutor(len(rngs)) as ex:
+        return list(ex.map(go, rngs))
+
+
 def work(a):
     if a.get("mode") == "warm":
         return {"ok": True}
@@ -118,6 +145,15 @@ def work(a):
             os.remove(tgz)
         for name, src in (a.get("files") or {}).items():
             fetch(src, safe_path(d, name))
+        if a.get("blender"):
+            tb = time.monotonic()
+            logs = run_blender(d, a["blender"])
+            if a["blender"].get("stills"):
+                pl = os.path.join(d, "plate")
+                return {"blender_seconds": round(time.monotonic() - tb, 2), "log": logs[-1][-400:],
+                        "stills": {f: base64.b64encode(open(os.path.join(pl, f), "rb").read()).decode()
+                                   for f in sorted(os.listdir(pl)) if f.endswith(".jpg")}}
+            blender_seconds = round(time.monotonic() - tb, 2)
         page_name = a.get("page", "index.html")
         if a.get("html_url"):
             fetch(a["html_url"], safe_path(d, page_name))
@@ -149,6 +185,7 @@ def work(a):
         cmd += ["-c:v", "copy", "-movflags", "+faststart", out]
         subprocess.run(cmd, check=True)
         res = {"frames": frames, "workers": len(jobs), "render_seconds": round(t_render, 2),
+               "blender_seconds": locals().get("blender_seconds"),
                "total_seconds": round(time.monotonic() - t0, 2), "bytes": os.path.getsize(out)}
         if a.get("telegram", True):
             chat = str(a.get("chat_id") or os.environ["CHAT_ID"])
