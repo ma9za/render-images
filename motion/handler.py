@@ -15,6 +15,10 @@ input:
                 The script gets env ASSET_DIR (bundle dir), PLATE_DIR (bundle/plate), FRAME_START/END and
                 must render its own frames (e.g. plate/f_0001.jpg) for the page to load.
                 With "stills", only those frames are rendered and returned as base64 JPEGs (no page render).
+                With "plate_only": the rendered plate frames are encoded to an mp4 and parked in Telegram
+                (sendDocument); returns {file_id, message_id, start, end} — no page render.
+  plates      : [{"file_id", "message_id", "start"}] plate videos parked by plate_only jobs: downloaded,
+                unpacked to plate/f_####.jpg (numbering from start), and their Telegram messages deleted.
 """
 import os, io, time, base64, subprocess, tempfile, shutil, tarfile, threading, functools, multiprocessing as mp
 import http.server, socketserver
@@ -154,6 +158,38 @@ def work(a):
                         "stills": {f: base64.b64encode(open(os.path.join(pl, f), "rb").read()).decode()
                                    for f in sorted(os.listdir(pl)) if f.endswith(".jpg")}}
             blender_seconds = round(time.monotonic() - tb, 2)
+            if a["blender"].get("plate_only"):
+                b = a["blender"]; pl = os.path.join(d, "plate"); pv = os.path.join(d, "plate.mp4")
+                subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-framerate", "24", "-start_number", str(b["start"]),
+                                "-i", os.path.join(pl, "f_%04d.jpg"), "-c:v", "libx264", "-preset", "slow",
+                                "-crf", str(b.get("crf", 17)), "-pix_fmt", "yuv420p", pv], check=True)
+                tok = os.environ["BOT_TOKEN"].strip(); chat = str(a.get("chat_id") or os.environ["CHAT_ID"])
+                with open(pv, "rb") as f:
+                    j = requests.post(f"https://api.telegram.org/bot{tok}/sendDocument",
+                                      data={"chat_id": chat, "caption": f"plate {b['start']}-{b['end']} (temp)",
+                                            "disable_notification": "true"},
+                                      files={"document": ("plate.mp4", f, "video/mp4")}, timeout=600).json()
+                if not j.get("ok"):
+                    raise RuntimeError("telegram: " + str(j.get("description")))
+                m = j["result"]; doc = m.get("document") or m.get("video")
+                return {"file_id": doc["file_id"], "message_id": m["message_id"], "start": b["start"], "end": b["end"],
+                        "bytes": os.path.getsize(pv), "blender_seconds": blender_seconds}
+        if a.get("plates"):
+            tok = os.environ["BOT_TOKEN"].strip(); chat = str(a.get("chat_id") or os.environ["CHAT_ID"])
+            pl = os.path.join(d, "plate"); os.makedirs(pl, exist_ok=True)
+            for k, p in enumerate(a["plates"]):
+                fp = requests.get(f"https://api.telegram.org/bot{tok}/getFile", params={"file_id": p["file_id"]}, timeout=60).json()
+                if not fp.get("ok"):
+                    raise RuntimeError("getFile: " + str(fp.get("description")))
+                vp = os.path.join(d, f"_plate{k}.mp4")
+                fetch(f"https://api.telegram.org/file/bot{tok}/{fp['result']['file_path']}", vp)
+                subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", vp, "-q:v", "2", "-start_number", str(p["start"]),
+                                os.path.join(pl, "f_%04d.jpg")], check=True)
+                os.remove(vp)
+            for p in a["plates"]:
+                if p.get("message_id"):
+                    requests.post(f"https://api.telegram.org/bot{tok}/deleteMessage",
+                                  data={"chat_id": chat, "message_id": p["message_id"]}, timeout=30)
         page_name = a.get("page", "index.html")
         if a.get("html_url"):
             fetch(a["html_url"], safe_path(d, page_name))
