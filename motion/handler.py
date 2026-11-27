@@ -152,7 +152,16 @@ def work(a):
                "total_seconds": round(time.monotonic() - t0, 2), "bytes": os.path.getsize(out)}
         if a.get("telegram", True):
             chat = str(a.get("chat_id") or os.environ["CHAT_ID"])
-            with open(out, "rb") as f:
+            # Telegram bots can't send files over 50 MB: re-encode to fit
+            send = out
+            if os.path.getsize(out) > 48_000_000:
+                send = os.path.join(segdir, "tg.mp4")
+                kbps = int(45_000_000 * 8 / 1000 / max(dur, 1)) - 160
+                subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", out, "-c:v", "libx264", "-preset", "fast",
+                                "-b:v", f"{kbps}k", "-maxrate", f"{int(kbps*1.3)}k", "-bufsize", f"{kbps*2}k",
+                                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", send], check=True)
+                res["tg_bytes"] = os.path.getsize(send)
+            with open(send, "rb") as f:
                 r = requests.post("https://api.telegram.org/bot" + os.environ["BOT_TOKEN"].strip() + "/sendVideo",
                                   data={"chat_id": chat, "caption": a.get("caption", ""), "supports_streaming": "true",
                                         "width": str(w), "height": str(h)},
